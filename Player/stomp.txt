@@ -1,0 +1,68 @@
+    IEnumerator StompCoroutine()
+    {
+        state = PlayerState.Stomping;
+        jumpCount = 0;
+        joint.enabled = true;
+
+        // Step 1: Find target direction
+        Transform nearest = FindNearestEnemy();
+        Vector2 dir = nearest != null
+            ? ((Vector2)nearest.position - rb.position).normalized
+            : Vector2.down;
+
+        if (dir == Vector2.zero) dir = Vector2.down;
+
+        // Step 2: Smooth stomp toward target
+        Vector2 startPos = rb.position;
+        Vector2 targetPos = startPos + dir * stompDistance;
+        float elapsed = 0f;
+
+        while (elapsed < stompDuration)
+        {
+            elapsed += Time.fixedDeltaTime;
+            float t = Mathf.SmoothStep(0f, 1f, elapsed / stompDuration);
+            Vector2 nextPos = Vector2.Lerp(startPos, targetPos, t);
+
+            rb.MovePosition(nextPos);
+
+            Collider2D hit = Physics2D.OverlapCircle(rb.position, 1f, LayerMask.GetMask("Enemy", "Ground"));
+            if (hit != null)
+            {
+                break; // cancel remaining movement
+            }
+
+            yield return new WaitForFixedUpdate();
+        }
+
+        // Step 3: Impact pause for weight
+        yield return new WaitForSeconds(0.05f);
+
+        joint.enabled = false;
+        state = PlayerState.Falling;
+    }
+
+        if (stompAction.triggered && state != PlayerState.Stomping && Time.time - stompTimer > stompCooldown)
+        {
+            stompTimer = Time.time;
+            StartCoroutine(StompCoroutine());
+        }
+
+            [Header("Stomp Settings")]
+    public float stompDistance = 5f;
+    public float stompDuration = 0.3f;
+    public float stompCooldown = 0.3f;
+    private float stompTimer = 0f;
+
+    if (currentOutlinedEnemy != n)
+                {
+                    if (currentOutlinedEnemy != null)
+                    {
+                        var sr = currentOutlinedEnemy.GetComponent<SpriteRenderer>();
+                        if (sr != null)
+                        {
+                            sr.material = NormalMaterial;
+                        }
+                    }
+                    n.GetComponent<SpriteRenderer>().material = OutlineMaterial;
+                    currentOutlinedEnemy = n;
+                }
