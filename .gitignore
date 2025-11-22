@@ -1,0 +1,27 @@
+# Ignore Unity cache and temp files
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+UserSettings/
+
+# Ignore solution & project files if you want
+*.csproj
+*.sln
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.meta
+
+# If tracking only scripts, ignore all other Assets files
+# This assumes your Scripts folder is the repo root
+# Otherwise, you'll need to ignore all subfolders except Scripts
