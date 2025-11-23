@@ -348,9 +348,6 @@ public class PlayerController : MonoBehaviour
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Double-jump rotation animation (keeps Balance usage consistent)
-    // -------------------------------------------------------------------------
     private IEnumerator DoDoubleJumpRotation(float duration)
     {
         if (balance == null) yield break;
@@ -427,7 +424,6 @@ public class PlayerController : MonoBehaviour
         dashTime = 0f;
         isDashing = true;
         rb.gravityScale = 0f;
-        DoDoubleJumpRotation(dashDuration + 0.1f);
         IgnoreDashCollisions();
 
         state = PlayerState.Falling;
@@ -474,10 +470,6 @@ public class PlayerController : MonoBehaviour
             Physics2D.IgnoreLayerCollision(gameObject.layer, layer, false);
     }
 
-
-    // -------------------------------------------------------------------------
-    // Death handling
-    // -------------------------------------------------------------------------
     public IEnumerator HandleDeath()
     {
         if (isDead) yield break; // prevent re-entry
@@ -501,9 +493,6 @@ public class PlayerController : MonoBehaviour
         GameManager.isGameOver = true;
     }
 
-    // -------------------------------------------------------------------------
-    // Collision events — uses normals to determine ground / instant fatal
-    // -------------------------------------------------------------------------
     void OnCollisionEnter2D(Collision2D collision)
     {
         if (isDead) return;
