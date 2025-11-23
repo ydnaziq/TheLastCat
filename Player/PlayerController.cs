@@ -33,6 +33,31 @@ public class PlayerController : MonoBehaviour
     public float jumpBufferTime = 0.12f;
     public float jumpCooldown = 0.08f;
 
+    [Header("Wave Dash Settings")]
+    public float waveDashHorizontalForce = 16f;
+    public float waveDashVerticalForce = -12f;
+    public float waveDashDuration = 0.18f;
+    public float waveDashInputWindow = 0.22f;
+
+    [Header("Dash Settings")]
+    public float dashForce = 18f;
+    public float dashDuration = 0.15f;
+
+    private bool isDashing = false;
+    private float dashTime = 0f;
+    private Vector2 dashStartVel;
+    private Vector2 dashTargetVel;
+
+    private InputAction dashAction;
+
+    [Header("Wave Dash Settings")]
+    private float waveDashTimer = 0f;
+    private bool waveDashQueued = false;
+    private bool isWaveDashing = false;
+    private float waveDashTime = 0f;
+    private Vector2 waveDashStartVel;
+    private Vector2 waveDashTargetVel;
+
     [Header("Ground Detection")]
     public LayerMask groundLayers;
     [Range(0f, 90f)]
@@ -88,13 +113,16 @@ public class PlayerController : MonoBehaviour
         // Resolve and enable actions (safe if InputSystem.actions exists)
         moveAction = InputSystem.actions?.FindAction("Move");
         jumpAction = InputSystem.actions?.FindAction("Jump");
+        dashAction = InputSystem.actions?.FindAction("Dash");
 
+        dashAction?.Enable();
         moveAction?.Enable();
         jumpAction?.Enable();
     }
 
     void OnDisable()
     {
+        dashAction?.Disable();
         moveAction?.Disable();
         jumpAction?.Disable();
     }
@@ -116,6 +144,12 @@ public class PlayerController : MonoBehaviour
             }
         }
 
+        if (!isDead && dashAction != null && dashAction.triggered)
+        {
+            float direction = moveInput.x != 0 ? Mathf.Sign(moveInput.x) : 1f;
+            StartDash(direction);
+        }
+
         // Decrease timers
         if (coyoteTimer > 0f) coyoteTimer -= Time.deltaTime;
         if (jumpBufferTimer > 0f) jumpBufferTimer -= Time.deltaTime;
@@ -133,6 +167,22 @@ public class PlayerController : MonoBehaviour
             if (rb.linearVelocity.y < -0.1f && state != PlayerState.Falling)
                 state = PlayerState.Falling;
         }
+
+        bool jumpPressed = jumpAction != null && jumpAction.triggered;
+        bool holdingDown = moveInput.y < -0.5f;
+
+        if (jumpPressed && holdingDown)
+        {
+            waveDashQueued = true;
+            waveDashTimer = waveDashInputWindow;
+        }
+        else
+        {
+            if (waveDashTimer > 0f)
+                waveDashTimer -= Time.deltaTime;
+            else
+                waveDashQueued = false;
+        }
     }
 
     void FixedUpdate()
@@ -142,7 +192,10 @@ public class PlayerController : MonoBehaviour
         UpdateGroundedState();
 
         HandleMovementPhysics();
+        HandleDashPhysics();
+
         HandleGravityPhysics();
+        HandleWaveDashPhysics();
 
         // Execute jump after physics preparation so we can zero vertical velocity cleanly
         if (jumpRequestedThisFrame)
@@ -327,6 +380,100 @@ public class PlayerController : MonoBehaviour
         balance.smoothSpeed = previousSmooth;
         balance.targetRotation = 0f;
     }
+
+    private void HandleWaveDashPhysics()
+    {
+        if (isWaveDashing)
+        {
+            waveDashTime += Time.fixedDeltaTime;
+            float t = waveDashTime / waveDashDuration;
+            Vector2 lerped = Vector2.Lerp(waveDashStartVel, waveDashTargetVel, t);
+            rb.linearVelocity = lerped;
+
+            if (t >= 1f)
+            {
+                isWaveDashing = false;
+                rb.gravityScale = 1f;
+            }
+            return;
+        }
+
+        bool recentlyJumped = (Time.time - lastJumpTime) <= waveDashInputWindow;
+
+        if (waveDashQueued && recentlyJumped)
+        {
+            waveDashQueued = false;
+
+            float dir = moveInput.x != 0 ? Mathf.Sign(moveInput.x) : 1f;
+
+            waveDashStartVel = rb.linearVelocity;
+            waveDashTargetVel = new Vector2(dir * waveDashHorizontalForce, waveDashVerticalForce);
+            waveDashTime = 0f;
+
+            isWaveDashing = true;
+            rb.gravityScale = downwardGravity * 1.5f;
+
+            if (availableJumps > 0)
+                availableJumps--;
+
+            state = PlayerState.Falling;
+        }
+    }
+
+    private void StartDash(float direction)
+    {
+        dashStartVel = rb.linearVelocity;
+        dashTargetVel = new Vector2(direction * dashForce, 0f);
+        dashTime = 0f;
+        isDashing = true;
+        rb.gravityScale = 0f;
+        DoDoubleJumpRotation(dashDuration + 0.1f);
+        IgnoreDashCollisions();
+
+        state = PlayerState.Falling;
+    }
+
+    private void HandleDashPhysics()
+    {
+        if (!isDashing) return;
+
+        dashTime += Time.fixedDeltaTime;
+        float t = dashTime / dashDuration;
+        rb.linearVelocity = Vector2.Lerp(dashStartVel, dashTargetVel, t);
+
+        if (headRb != null)
+            headRb.position += (rb.linearVelocity - dashStartVel) * Time.fixedDeltaTime;
+
+        if (t >= 1f)
+        {
+            isDashing = false;
+            rb.gravityScale = 1f;
+            RestoreDashCollisions();
+        }
+    }
+
+    private void IgnoreDashCollisions()
+    {
+        if (headRb != null)
+        {
+            foreach (int layer in new int[] { LayerMask.NameToLayer("Fatal"), LayerMask.NameToLayer("Enemy") })
+                Physics2D.IgnoreLayerCollision(headRb.gameObject.layer, layer, true);
+        }
+        foreach (int layer in new int[] { LayerMask.NameToLayer("Fatal"), LayerMask.NameToLayer("Enemy") })
+            Physics2D.IgnoreLayerCollision(gameObject.layer, layer, true);
+    }
+
+    private void RestoreDashCollisions()
+    {
+        if (headRb != null)
+        {
+            foreach (int layer in new int[] { LayerMask.NameToLayer("Fatal"), LayerMask.NameToLayer("Enemy") })
+                Physics2D.IgnoreLayerCollision(headRb.gameObject.layer, layer, false);
+        }
+        foreach (int layer in new int[] { LayerMask.NameToLayer("Fatal"), LayerMask.NameToLayer("Enemy") })
+            Physics2D.IgnoreLayerCollision(gameObject.layer, layer, false);
+    }
+
 
     // -------------------------------------------------------------------------
     // Death handling
