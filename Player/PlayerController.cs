@@ -5,28 +5,23 @@ using UnityEngine.InputSystem;
 [RequireComponent(typeof(Rigidbody2D))]
 public class PlayerController : MonoBehaviour
 {
+    #region Enums
     private enum PlayerState { Grounded, Jumping, Falling, Dead }
+    #endregion
+
+    #region Inspector Settings
 
     [Header("Gravity Settings")]
-    [Tooltip("Normal gravity while rising when holding jump")]
-    public float upwardGravity = 1.5f;
-    [Tooltip("Gravity while falling")]
-    public float downwardGravity = 4f;
-    [Tooltip("Gravity when jump is cut (short press)")]
-    public float jumpCutGravity = 6f;
-    [Tooltip("Maximum downward speed")]
-    public float terminalVelocity = 30f;
+    [Tooltip("Normal gravity while rising when holding jump")] public float upwardGravity = 1.5f;
+    [Tooltip("Gravity while falling")] public float downwardGravity = 4f;
+    [Tooltip("Gravity when jump is cut (short press)")] public float jumpCutGravity = 6f;
+    [Tooltip("Maximum downward speed")] public float terminalVelocity = 30f;
 
     [Header("Movement Settings")]
     public float moveSpeed = 10f;
-    [Tooltip("Multiplier applied to moveSpeed while in air")]
-    [Range(0f, 1f)]
-    public float airControlMultiplier = 0.8f;
-
-    [Tooltip("Base jump impulse force")]
-    public float jumpForce = 14f;
-    [Tooltip("Maximum number of jumps (1 = single, 2 = double)")]
-    public int maxJumpCount = 2;
+    [Range(0f, 1f), Tooltip("Multiplier applied to moveSpeed while in air")] public float airControlMultiplier = 0.8f;
+    [Tooltip("Base jump impulse force")] public float jumpForce = 14f;
+    [Tooltip("Maximum number of jumps (1 = single, 2 = double)")] public int maxJumpCount = 2;
 
     [Header("Jump Feel")]
     public float coyoteTime = 0.12f;
@@ -43,39 +38,27 @@ public class PlayerController : MonoBehaviour
     public float dashForce = 18f;
     public float dashDuration = 0.15f;
 
-    private bool isDashing = false;
-    private float dashTime = 0f;
-    private Vector2 dashStartVel;
-    private Vector2 dashTargetVel;
-
-    private InputAction dashAction;
-
-    [Header("Wave Dash Settings")]
-    private float waveDashTimer = 0f;
-    private bool waveDashQueued = false;
-    private bool isWaveDashing = false;
-    private float waveDashTime = 0f;
-    private Vector2 waveDashStartVel;
-    private Vector2 waveDashTargetVel;
-
     [Header("Ground Detection")]
     public LayerMask groundLayers;
-    [Range(0f, 90f)]
-    public float maxGroundAngle = 60f;
+    [Range(0f, 90f)] public float maxGroundAngle = 60f;
     public float groundCheckRadius = 0.1f;
-    [Tooltip("Offset from object pivot for ground-check")]
-    public Vector2 groundCheckOffset = new Vector2(0f, -0.5f);
+    [Tooltip("Offset from object pivot for ground-check")] public Vector2 groundCheckOffset = new Vector2(0f, -0.5f);
 
-    [Header("References (assign in inspector when possible)")]
-    public Rigidbody2D headRb;
+    [Header("References")]
+    [SerializeField] private ParticleSystem trailParticles;
+    public Rigidbody2D headRb; // optional, auto-find if null
+
+    #endregion
+
+    #region Private Fields
+
     private Rigidbody2D rb;
     private Balance balance;
 
-    [Header("Input (auto-resolve using InputSystem.actions)")]
     private InputAction moveAction;
     private InputAction jumpAction;
+    private InputAction dashAction;
 
-    // Internal state
     private Vector2 moveInput;
     private int availableJumps;
     private bool jumpRequestedThisFrame;
@@ -86,17 +69,32 @@ public class PlayerController : MonoBehaviour
 
     private PlayerState state = PlayerState.Grounded;
     private Coroutine rotationCoroutine;
-
     private bool isDead = false;
 
-    // -------------------------------------------------------------------------
-    // Unity event methods
-    // -------------------------------------------------------------------------
+    // Dash state
+    private bool isDashing = false;
+    private float dashTime = 0f;
+    private Vector2 dashStartVel;
+    private Vector2 dashTargetVel;
+
+    // Wave dash state
+    private bool waveDashQueued = false;
+    private bool isWaveDashing = false;
+    private float waveDashTimer = 0f;
+    private float waveDashTime = 0f;
+    private Vector2 waveDashStartVel;
+    private Vector2 waveDashTargetVel;
+
+    #endregion
+
+    #region Unity Callbacks
+
     void Awake()
     {
         rb = GetComponent<Rigidbody2D>();
         balance = GetComponent<Balance>();
 
+        // Auto-find head Rigidbody if not assigned
         if (headRb == null)
         {
             var headObj = GameObject.FindGameObjectWithTag("PlayerHead");
@@ -104,70 +102,128 @@ public class PlayerController : MonoBehaviour
                 headRb = headObj.GetComponent<Rigidbody2D>();
         }
 
-        // initialize jump counts
         availableJumps = maxJumpCount;
+
     }
 
     void OnEnable()
     {
-        // Resolve and enable actions (safe if InputSystem.actions exists)
         moveAction = InputSystem.actions?.FindAction("Move");
         jumpAction = InputSystem.actions?.FindAction("Jump");
         dashAction = InputSystem.actions?.FindAction("Dash");
 
-        dashAction?.Enable();
         moveAction?.Enable();
         jumpAction?.Enable();
+        dashAction?.Enable();
     }
 
     void OnDisable()
     {
-        dashAction?.Disable();
         moveAction?.Disable();
         jumpAction?.Disable();
+        dashAction?.Disable();
     }
 
     void Update()
     {
         if (isDead) return;
 
-        // Read move input (kept in Update so input is fluid)
-        moveInput = moveAction != null ? moveAction.ReadValue<Vector2>() : Vector2.zero;
+        HandleInput();
+        UpdateWaveDashQueue();
+    }
 
-        // Jump buffering: if player pressed jump this frame, start buffer timer
-        if (jumpAction != null)
+    void FixedUpdate()
+    {
+        if (isDead) return;
+
+        UpdateGroundedState();
+
+        HandleMovementPhysics();
+        HandleGravityPhysics();
+        HandleDashPhysics();
+        HandleWaveDashPhysics();
+
+        if (jumpRequestedThisFrame)
         {
-            // Unity InputSystem: triggered is true on press
-            if (jumpAction.triggered)
+            ExecuteJump();
+            jumpRequestedThisFrame = false;
+        }
+    }
+
+    void OnCollisionEnter2D(Collision2D collision)
+    {
+        if (isDead) return;
+
+        // Instant kill
+        if (collision.gameObject.layer == LayerMask.NameToLayer("InstantFatal"))
+        {
+            var bloodPrefab = Resources.Load<GameObject>("Prefabs/Effects/Blood");
+            if (bloodPrefab != null)
+                Instantiate(bloodPrefab, transform.position, Quaternion.identity);
+
+            StartCoroutine(HandleDeath());
+            return;
+        }
+
+        foreach (var contact in collision.contacts)
+        {
+            if (Vector2.Angle(contact.normal, Vector2.up) <= maxGroundAngle)
             {
-                jumpBufferTimer = jumpBufferTime;
+                availableJumps = maxJumpCount;
+                coyoteTimer = coyoteTime;
+                state = PlayerState.Grounded;
+                break;
             }
         }
+    }
 
-        if (!isDead && dashAction != null && dashAction.triggered)
+    void OnCollisionExit2D(Collision2D collision)
+    {
+        if (isDead) return;
+        if (rb.linearVelocity.y < 0f) state = PlayerState.Falling;
+    }
+
+    void OnDrawGizmosSelected()
+    {
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawWireSphere((Vector2)transform.position + groundCheckOffset, groundCheckRadius);
+
+#if UNITY_EDITOR
+        UnityEditor.Handles.Label(transform.position + Vector3.up * 1f, $"State: {state}");
+#endif
+    }
+
+    #endregion
+
+    #region Input Handling
+
+    private void HandleInput()
+    {
+        moveInput = moveAction != null ? moveAction.ReadValue<Vector2>() : Vector2.zero;
+
+        // Jump buffering
+        if (jumpAction != null && jumpAction.triggered)
+            jumpBufferTimer = jumpBufferTime;
+
+        // Dash input
+        if (dashAction != null && dashAction.triggered)
         {
-            float direction = moveInput.x != 0 ? Mathf.Sign(moveInput.x) : 1f;
-            StartDash(direction);
+            float dir = moveInput.x != 0 ? Mathf.Sign(moveInput.x) : 1f;
+            StartDash(dir);
         }
 
-        // Decrease timers
         if (coyoteTimer > 0f) coyoteTimer -= Time.deltaTime;
         if (jumpBufferTimer > 0f) jumpBufferTimer -= Time.deltaTime;
 
-        // If buffered jump exists and we are allowed to jump, request jump
         if (jumpBufferTimer > 0f && (coyoteTimer > 0f || availableJumps > 0) && Time.time - lastJumpTime > jumpCooldown)
         {
-            RequestJump();
-            jumpBufferTimer = 0f; // consume buffer
+            jumpRequestedThisFrame = true;
+            jumpBufferTimer = 0f;
         }
+    }
 
-        // Track state from vertical velocity (for visuals / other logic)
-        if (!isDead)
-        {
-            if (rb.linearVelocity.y < -0.1f && state != PlayerState.Falling)
-                state = PlayerState.Falling;
-        }
-
+    private void UpdateWaveDashQueue()
+    {
         bool jumpPressed = jumpAction != null && jumpAction.triggered;
         bool holdingDown = moveInput.y < -0.5f;
 
@@ -178,39 +234,18 @@ public class PlayerController : MonoBehaviour
         }
         else
         {
-            if (waveDashTimer > 0f)
-                waveDashTimer -= Time.deltaTime;
-            else
-                waveDashQueued = false;
+            waveDashTimer -= Time.deltaTime;
+            if (waveDashTimer <= 0f) waveDashQueued = false;
         }
     }
 
-    void FixedUpdate()
-    {
-        if (isDead) return;
+    #endregion
 
-        UpdateGroundedState();
+    #region Movement Physics
 
-        HandleMovementPhysics();
-        HandleDashPhysics();
-
-        HandleGravityPhysics();
-        HandleWaveDashPhysics();
-
-        // Execute jump after physics preparation so we can zero vertical velocity cleanly
-        if (jumpRequestedThisFrame)
-        {
-            ExecuteJump();
-            jumpRequestedThisFrame = false;
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Movement & Gravity
-    // -------------------------------------------------------------------------
     private void HandleMovementPhysics()
     {
-        float control = (state == PlayerState.Grounded) ? 1f : airControlMultiplier;
+        float control = state == PlayerState.Grounded ? 1f : airControlMultiplier;
         Vector2 vel = rb.linearVelocity;
         vel.x = moveInput.x * moveSpeed * control;
         rb.linearVelocity = vel;
@@ -220,23 +255,17 @@ public class PlayerController : MonoBehaviour
     {
         float vy = rb.linearVelocity.y;
 
-        if (vy > 0.01f) // going up
+        if (vy > 0.01f)
         {
-            // if player holds jump (InputSystem: check value)
             bool holdingJump = jumpAction != null && jumpAction.ReadValue<float>() > 0.5f;
             rb.gravityScale = holdingJump ? upwardGravity : jumpCutGravity;
         }
-        else if (vy < -0.01f) // going down
+        else if (vy < -0.01f)
         {
             rb.gravityScale = downwardGravity;
         }
-        else
-        {
-            // near zero vertical velocity - keep default gravity scale
-            rb.gravityScale = 1f;
-        }
+        else rb.gravityScale = 1f;
 
-        // clamp terminal velocity
         if (rb.linearVelocity.y < -terminalVelocity)
         {
             Vector2 v = rb.linearVelocity;
@@ -245,106 +274,33 @@ public class PlayerController : MonoBehaviour
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Jumping
-    // -------------------------------------------------------------------------
-    private void RequestJump()
-    {
-        jumpRequestedThisFrame = true;
-    }
+    #endregion
+
+    #region Jumping
 
     private void ExecuteJump()
     {
-        // sanity guard
         if (Time.time - lastJumpTime < jumpCooldown) return;
 
-        // If grounded or within coyote time we can still jump even if availableJumps is max
         bool allowed = (coyoteTimer > 0f) || (availableJumps > 0);
         if (!allowed) return;
 
         lastJumpTime = Time.time;
 
-        // decrement jumps only when not grounded (so that from ground you keep one less)
-        if (state != PlayerState.Grounded)
-            availableJumps = Mathf.Max(0, availableJumps - 1);
-        else
-            availableJumps = Mathf.Max(0, availableJumps - 1); // on-ground consumes 1 jump too
+        if (state != PlayerState.Grounded) availableJumps = Mathf.Max(0, availableJumps - 1);
+        else availableJumps = Mathf.Max(0, availableJumps - 1);
 
-        // reset vertical velocity for consistent jump feel
         Vector2 v = rb.linearVelocity;
         v.y = 0f;
         rb.linearVelocity = v;
 
-        // apply jump impulse
         rb.AddForce(Vector2.up * jumpForce, ForceMode2D.Impulse);
-
-        // update state
         state = PlayerState.Jumping;
 
-        // if this was a mid-air/double jump, play rotation animation on Balance
         if (availableJumps == 0 && balance != null)
         {
-            // kill previous coroutine if any
             if (rotationCoroutine != null) StopCoroutine(rotationCoroutine);
             rotationCoroutine = StartCoroutine(DoDoubleJumpRotation(0.3f));
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Ground detection (contact normal based)
-    // -------------------------------------------------------------------------
-    private void UpdateGroundedState()
-    {
-        bool grounded = false;
-
-        // Prefer physics-ground-check by casting a small circle near feet
-        Vector2 checkCenter = (Vector2)transform.position + groundCheckOffset;
-        Collider2D[] hits = Physics2D.OverlapCircleAll(checkCenter, groundCheckRadius, groundLayers);
-
-        if (hits != null && hits.Length > 0)
-        {
-            // Check contact normals via colliders -> use the collider's bounds to approximate normal by sample raycast
-            foreach (var c in hits)
-            {
-                // cast a short ray from slightly above to point toward collider to get normal from the contact point
-                RaycastHit2D hit = Physics2D.Raycast((Vector2)transform.position + Vector2.up * 0.1f, (c.transform.position - transform.position).normalized, 1f, groundLayers);
-                if (hit.collider != null)
-                {
-                    float angle = Vector2.Angle(hit.normal, Vector2.up);
-                    if (angle <= maxGroundAngle)
-                    {
-                        grounded = true;
-                        break;
-                    }
-                }
-                else
-                {
-                    // fallback: if collider is below player, consider ground (works for simple setups)
-                    if (c.bounds.center.y <= transform.position.y)
-                    {
-                        grounded = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (grounded)
-        {
-            // reset jump counters when touching ground
-            availableJumps = maxJumpCount;
-            coyoteTimer = coyoteTime;
-            if (state == PlayerState.Falling || state == PlayerState.Jumping)
-                state = PlayerState.Grounded;
-        }
-        else
-        {
-            // if we just left the ground, start coyote timer (only when previously grounded)
-            if (state == PlayerState.Grounded)
-                coyoteTimer = coyoteTime;
-
-            if (state != PlayerState.Dead)
-                state = PlayerState.Falling;
         }
     }
 
@@ -352,10 +308,10 @@ public class PlayerController : MonoBehaviour
     {
         if (balance == null) yield break;
 
-        float previousSmooth = balance.smoothSpeed;
+        float prevSmooth = balance.smoothSpeed;
         balance.smoothSpeed = 10000f;
-        float elapsed = 0f;
 
+        float elapsed = 0f;
         float from = balance.targetRotation;
         float to = from + 360f * (moveInput.x <= 0 ? 1f : -1f);
 
@@ -369,13 +325,48 @@ public class PlayerController : MonoBehaviour
             yield return null;
         }
 
-        // allow a small hold
         yield return new WaitForSeconds(0.15f);
 
-        // reset
         if (joint != null) joint.enabled = false;
-        balance.smoothSpeed = previousSmooth;
+        balance.smoothSpeed = prevSmooth;
         balance.targetRotation = 0f;
+    }
+
+    #endregion
+
+    #region Dash & Wave Dash
+
+    private void StartDash(float direction)
+    {
+        dashStartVel = rb.linearVelocity;
+        dashTargetVel = new Vector2(direction * dashForce, 0f);
+        dashTime = 0f;
+        isDashing = true;
+        rb.gravityScale = 0f;
+        IgnoreDashCollisions();
+        state = PlayerState.Falling;
+    }
+
+    private void HandleDashPhysics()
+    {
+        if (!isDashing) return;
+
+        dashTime += Time.fixedDeltaTime;
+        float t = dashTime / dashDuration;
+        rb.linearVelocity = Vector2.Lerp(dashStartVel, dashTargetVel, t);
+
+        if (headRb != null)
+        {
+            var trailParticlesMain = trailParticles.main;
+            trailParticlesMain.startColor = new ParticleSystem.MinMaxGradient(Color.white, Color.cyan);
+            headRb.position += (rb.linearVelocity - dashStartVel) * Time.fixedDeltaTime;
+        }
+        if (t >= 1f)
+        {
+            isDashing = false;
+            rb.gravityScale = 1f;
+            RestoreDashCollisions();
+        }
     }
 
     private void HandleWaveDashPhysics()
@@ -384,8 +375,7 @@ public class PlayerController : MonoBehaviour
         {
             waveDashTime += Time.fixedDeltaTime;
             float t = waveDashTime / waveDashDuration;
-            Vector2 lerped = Vector2.Lerp(waveDashStartVel, waveDashTargetVel, t);
-            rb.linearVelocity = lerped;
+            rb.linearVelocity = Vector2.Lerp(waveDashStartVel, waveDashTargetVel, t);
 
             if (t >= 1f)
             {
@@ -400,7 +390,6 @@ public class PlayerController : MonoBehaviour
         if (waveDashQueued && recentlyJumped)
         {
             waveDashQueued = false;
-
             float dir = moveInput.x != 0 ? Mathf.Sign(moveInput.x) : 1f;
 
             waveDashStartVel = rb.linearVelocity;
@@ -417,37 +406,6 @@ public class PlayerController : MonoBehaviour
         }
     }
 
-    private void StartDash(float direction)
-    {
-        dashStartVel = rb.linearVelocity;
-        dashTargetVel = new Vector2(direction * dashForce, 0f);
-        dashTime = 0f;
-        isDashing = true;
-        rb.gravityScale = 0f;
-        IgnoreDashCollisions();
-
-        state = PlayerState.Falling;
-    }
-
-    private void HandleDashPhysics()
-    {
-        if (!isDashing) return;
-
-        dashTime += Time.fixedDeltaTime;
-        float t = dashTime / dashDuration;
-        rb.linearVelocity = Vector2.Lerp(dashStartVel, dashTargetVel, t);
-
-        if (headRb != null)
-            headRb.position += (rb.linearVelocity - dashStartVel) * Time.fixedDeltaTime;
-
-        if (t >= 1f)
-        {
-            isDashing = false;
-            rb.gravityScale = 1f;
-            RestoreDashCollisions();
-        }
-    }
-
     private void IgnoreDashCollisions()
     {
         if (headRb != null)
@@ -455,6 +413,7 @@ public class PlayerController : MonoBehaviour
             foreach (int layer in new int[] { LayerMask.NameToLayer("Fatal"), LayerMask.NameToLayer("Enemy") })
                 Physics2D.IgnoreLayerCollision(headRb.gameObject.layer, layer, true);
         }
+
         foreach (int layer in new int[] { LayerMask.NameToLayer("Fatal"), LayerMask.NameToLayer("Enemy") })
             Physics2D.IgnoreLayerCollision(gameObject.layer, layer, true);
     }
@@ -466,23 +425,62 @@ public class PlayerController : MonoBehaviour
             foreach (int layer in new int[] { LayerMask.NameToLayer("Fatal"), LayerMask.NameToLayer("Enemy") })
                 Physics2D.IgnoreLayerCollision(headRb.gameObject.layer, layer, false);
         }
+
         foreach (int layer in new int[] { LayerMask.NameToLayer("Fatal"), LayerMask.NameToLayer("Enemy") })
             Physics2D.IgnoreLayerCollision(gameObject.layer, layer, false);
     }
 
+    #endregion
+
+    #region Ground Detection
+
+    private void UpdateGroundedState()
+    {
+        bool grounded = false;
+        Vector2 checkCenter = (Vector2)transform.position + groundCheckOffset;
+        Collider2D[] hits = Physics2D.OverlapCircleAll(checkCenter, groundCheckRadius, groundLayers);
+
+        foreach (var c in hits)
+        {
+            RaycastHit2D hit = Physics2D.Raycast((Vector2)transform.position + Vector2.up * 0.1f,
+                (c.transform.position - transform.position).normalized, 1f, groundLayers);
+
+            if ((hit.collider != null && Vector2.Angle(hit.normal, Vector2.up) <= maxGroundAngle) ||
+                c.bounds.center.y <= transform.position.y)
+            {
+                grounded = true;
+                break;
+            }
+        }
+
+        if (grounded)
+        {
+            availableJumps = maxJumpCount;
+            coyoteTimer = coyoteTime;
+            if (state == PlayerState.Falling || state == PlayerState.Jumping)
+                state = PlayerState.Grounded;
+        }
+        else if (state == PlayerState.Grounded)
+        {
+            coyoteTimer = coyoteTime;
+            state = PlayerState.Falling;
+        }
+    }
+
+    #endregion
+
+    #region Death Handling
+
     public IEnumerator HandleDeath()
     {
-        if (isDead) yield break; // prevent re-entry
+        if (isDead) yield break;
+
         isDead = true;
         state = PlayerState.Dead;
 
-        // disable movement and zero velocity
         rb.linearVelocity = Vector2.zero;
         rb.bodyType = RigidbodyType2D.Dynamic;
-        var pj = GetComponent<Collider2D>();
-        if (pj != null) pj.enabled = false;
 
-        // disable head spring if present
         if (headRb != null)
         {
             var spring = headRb.GetComponent<SpringJoint2D>();
@@ -493,59 +491,5 @@ public class PlayerController : MonoBehaviour
         GameManager.isGameOver = true;
     }
 
-    void OnCollisionEnter2D(Collision2D collision)
-    {
-        if (isDead) return;
-
-        // Instant kill layer check
-        int instaLayer = LayerMask.NameToLayer("InstantFatal");
-        if (collision.gameObject.layer == instaLayer)
-        {
-            var bloodPrefab = Resources.Load<GameObject>("Prefabs/Effects/Blood");
-            if (bloodPrefab != null)
-                Instantiate(bloodPrefab, transform.position, Quaternion.identity);
-
-            StartCoroutine(HandleDeath());
-            return;
-        }
-
-        foreach (var contact in collision.contacts)
-        {
-            float angle = Vector2.Angle(contact.normal, Vector2.up);
-            if (angle <= maxGroundAngle)
-            {
-                // ground contact found
-                availableJumps = maxJumpCount;
-                coyoteTimer = coyoteTime;
-                state = PlayerState.Grounded;
-                break;
-            }
-        }
-    }
-
-    void OnCollisionExit2D(Collision2D collision)
-    {
-        // Do not mark falling on exit if still has some grounded contacts (complex scenes).
-        // A robust approach would maintain a contact counter per ground collider. For simplicity:
-        if (isDead) return;
-
-        // we leave collision -> start falling, but only if vertical velocity is negative
-        if (rb.linearVelocity.y < 0f)
-            state = PlayerState.Falling;
-    }
-
-    // -------------------------------------------------------------------------
-    // Debug gizmos
-    // -------------------------------------------------------------------------
-    void OnDrawGizmosSelected()
-    {
-        Gizmos.color = Color.yellow;
-        Vector2 checkCenter = (Vector2)transform.position + groundCheckOffset;
-        Gizmos.DrawWireSphere(checkCenter, groundCheckRadius);
-
-        // draw coyote / buffer debug text (only in editor)
-#if UNITY_EDITOR
-        UnityEditor.Handles.Label(transform.position + Vector3.up * 1f, $"State: {state}");
-#endif
-    }
+    #endregion
 }

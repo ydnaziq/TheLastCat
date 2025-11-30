@@ -9,21 +9,18 @@ public class PlayerWeaponsManager : MonoBehaviour
     private InputAction equipAction;
 
     public float equipRadius = 1.5f;
-    public LayerMask weaponMask;
 
-    private PlayerMeleeWeaponController currentEquipped;
-
-    public List<PlayerMeleeWeaponController> equippedSpears = new List<PlayerMeleeWeaponController>();
+    public List<PlayerWeaponController> equippedSpears = new List<PlayerWeaponController>();
 
     [Header("Slash Settings")]
     private InputAction slashAction;
     private int currentSpearIndex = 0;
-    private bool globalSlashOnCooldown = false;
-    [SerializeField] private float globalSlashCooldown = 1f; // example
+    public bool globalSlashOnCooldown = false;
+    [SerializeField] private float globalSlashCooldown = 1f;
 
     void Start()
     {
-        slashAction = InputSystem.actions.FindAction("Slash");
+        slashAction = InputSystem.actions.FindAction("Attack");
         equipAction = InputSystem.actions.FindAction("Interact");
     }
 
@@ -46,15 +43,15 @@ public class PlayerWeaponsManager : MonoBehaviour
 
         if (hits.Length > 0)
         {
-            PlayerMeleeWeaponController closest = null;
-            PlayerMeleeWeaponController closestUnequipped = null;
+            PlayerWeaponController closest = null;
+            PlayerWeaponController closestUnequipped = null;
             float closestDist = Mathf.Infinity;
             float closestUnequippedDist = Mathf.Infinity;
 
             foreach (var h in hits)
             {
                 if (!h.CompareTag("Equippable")) continue;
-                var weapon = h.GetComponent<PlayerMeleeWeaponController>();
+                var weapon = h.GetComponent<PlayerWeaponController>();
                 if (!weapon) continue;
 
                 float d = Vector2.Distance(transform.position, weapon.transform.position);
@@ -96,22 +93,13 @@ public class PlayerWeaponsManager : MonoBehaviour
 
     void TrySlash()
     {
-        // no spears
         if (equippedSpears.Count == 0) return;
-
-        // global cooldown
         if (globalSlashOnCooldown) return;
-
-        // get next spear
         var spear = equippedSpears[currentSpearIndex];
+        StartCoroutine(spear.ProjectileRoutine());
 
-        // run that spear’s slash routine
-        StartCoroutine(spear.SlashRoutine());
-
-        // move to next spear
         currentSpearIndex++;
 
-        // if we reached the end → apply global cooldown
         if (currentSpearIndex >= equippedSpears.Count)
         {
             currentSpearIndex = 0;
@@ -119,7 +107,7 @@ public class PlayerWeaponsManager : MonoBehaviour
         }
     }
 
-    public void PlayEquipAnimation(PlayerMeleeWeaponController spear, Transform player)
+    public void PlayEquipAnimation(PlayerWeaponController spear, Transform player)
     {
         Transform t = spear.transform;
         Rigidbody2D rb = spear.GetComponent<Rigidbody2D>();
@@ -166,7 +154,7 @@ public class PlayerWeaponsManager : MonoBehaviour
 
 
 
-    public void PlayUnequipAnimation(PlayerMeleeWeaponController spear)
+    public void PlayUnequipAnimation(PlayerWeaponController spear)
     {
         Transform t = spear.transform;
         Rigidbody2D rb = spear.GetComponent<Rigidbody2D>();
@@ -190,13 +178,13 @@ public class PlayerWeaponsManager : MonoBehaviour
     }
 
 
-    public void RegisterSpear(PlayerMeleeWeaponController spear)
+    public void RegisterSpear(PlayerWeaponController spear)
     {
         if (!equippedSpears.Contains(spear))
             equippedSpears.Add(spear);
     }
 
-    public void UnregisterSpear(PlayerMeleeWeaponController spear)
+    public void UnregisterSpear(PlayerWeaponController spear)
     {
         equippedSpears.Remove(spear);
     }
