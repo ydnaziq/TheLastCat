@@ -129,7 +129,6 @@ public class PlayerController : MonoBehaviour
         if (isDead) return;
 
         HandleInput();
-        UpdateWaveDashQueue();
     }
 
     void FixedUpdate()
@@ -199,43 +198,62 @@ public class PlayerController : MonoBehaviour
 
     private void HandleInput()
     {
+        // Read movement input
         moveInput = moveAction != null ? moveAction.ReadValue<Vector2>() : Vector2.zero;
 
-        // Jump buffering
-        if (jumpAction != null && jumpAction.triggered)
+        bool jumpPressed = jumpAction != null && jumpAction.triggered;
+        bool dashPressed = dashAction != null && dashAction.triggered;
+        bool holdingDown = moveInput.y < -0.5f;
+
+        // ------------------------------
+        // JUMP BUFFER
+        // ------------------------------
+        if (jumpPressed)
             jumpBufferTimer = jumpBufferTime;
 
-        // Dash input
-        if (dashAction != null && dashAction.triggered)
+        // ------------------------------
+        // DASH INPUT
+        // ------------------------------
+        if (dashPressed)
         {
             float dir = moveInput.x != 0 ? Mathf.Sign(moveInput.x) : 1f;
             StartDash(dir);
         }
 
-        if (coyoteTimer > 0f) coyoteTimer -= Time.deltaTime;
-        if (jumpBufferTimer > 0f) jumpBufferTimer -= Time.deltaTime;
-
-        if (jumpBufferTimer > 0f && (coyoteTimer > 0f || availableJumps > 0) && Time.time - lastJumpTime > jumpCooldown)
-        {
-            jumpRequestedThisFrame = true;
-            jumpBufferTimer = 0f;
-        }
-    }
-
-    private void UpdateWaveDashQueue()
-    {
-        bool jumpPressed = jumpAction != null && jumpAction.triggered;
-        bool holdingDown = moveInput.y < -0.5f;
-
+        // ------------------------------
+        // WAVE-DASH QUEUE (jump + holding down)
+        // ------------------------------
         if (jumpPressed && holdingDown)
         {
             waveDashQueued = true;
+
+            var main = trailParticles.main;
+            main.startColor = Color.cyan;
+
             waveDashTimer = waveDashInputWindow;
         }
         else
         {
             waveDashTimer -= Time.deltaTime;
-            if (waveDashTimer <= 0f) waveDashQueued = false;
+            if (waveDashTimer <= 0f)
+                waveDashQueued = false;
+        }
+
+        // ------------------------------
+        // TIMERS
+        // ------------------------------
+        if (coyoteTimer > 0f) coyoteTimer -= Time.deltaTime;
+        if (jumpBufferTimer > 0f) jumpBufferTimer -= Time.deltaTime;
+
+        // ------------------------------
+        // FINAL JUMP EXECUTION CONDITIONS
+        // ------------------------------
+        if (jumpBufferTimer > 0f &&
+            (coyoteTimer > 0f || availableJumps > 0) &&
+            Time.time - lastJumpTime > jumpCooldown)
+        {
+            jumpRequestedThisFrame = true;
+            jumpBufferTimer = 0f;
         }
     }
 
@@ -338,6 +356,8 @@ public class PlayerController : MonoBehaviour
 
     private void StartDash(float direction)
     {
+        var trailParticlesMain = trailParticles.main;
+        trailParticlesMain.startColor = Color.cyan;
         dashStartVel = rb.linearVelocity;
         dashTargetVel = new Vector2(direction * dashForce, 0f);
         dashTime = 0f;
@@ -350,19 +370,18 @@ public class PlayerController : MonoBehaviour
     private void HandleDashPhysics()
     {
         if (!isDashing) return;
-
+        var trailParticlesMain = trailParticles.main;
         dashTime += Time.fixedDeltaTime;
         float t = dashTime / dashDuration;
         rb.linearVelocity = Vector2.Lerp(dashStartVel, dashTargetVel, t);
 
         if (headRb != null)
         {
-            var trailParticlesMain = trailParticles.main;
-            trailParticlesMain.startColor = new ParticleSystem.MinMaxGradient(Color.white, Color.cyan);
             headRb.position += (rb.linearVelocity - dashStartVel) * Time.fixedDeltaTime;
         }
         if (t >= 1f)
         {
+            trailParticlesMain.startColor = Color.white;
             isDashing = false;
             rb.gravityScale = 1f;
             RestoreDashCollisions();
@@ -373,12 +392,14 @@ public class PlayerController : MonoBehaviour
     {
         if (isWaveDashing)
         {
+            var trailParticlesMain = trailParticles.main;
             waveDashTime += Time.fixedDeltaTime;
             float t = waveDashTime / waveDashDuration;
             rb.linearVelocity = Vector2.Lerp(waveDashStartVel, waveDashTargetVel, t);
 
             if (t >= 1f)
             {
+                trailParticlesMain.startColor = Color.white;
                 isWaveDashing = false;
                 rb.gravityScale = 1f;
             }

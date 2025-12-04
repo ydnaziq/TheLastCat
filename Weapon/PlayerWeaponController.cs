@@ -15,6 +15,7 @@ public class PlayerWeaponController : MonoBehaviour
     public float damping = 5f;
     public float maxSpeed = 12f;
     public float lookaheadInertia = 0.2f;
+    private float lastMoveX = 1f; // default facing right
 
     [Header("Projectile Settings")]
     public float projectileForce = 10f;
@@ -28,6 +29,8 @@ public class PlayerWeaponController : MonoBehaviour
     [HideInInspector] public Quaternion originalRotation;
 
     [Header("Aim / Input Settings")]
+    [SerializeField] private float followRadius = 2f;
+    [SerializeField] private float aimBias = 0.25f;
     [Range(0f, 0.5f)] public float stickDeadzone = 0.18f;
     public bool requireStickNeutralToAutoTarget = true;
     public float angleLerpSpeed = 12f;
@@ -40,6 +43,8 @@ public class PlayerWeaponController : MonoBehaviour
     private float angle;
     private bool isFiring = false;
     private bool isSlashing = false;
+    public bool onCooldown = false;
+    private float coolDownDistance = 2f;
 
     private Transform mostRecentTarget;
     private Material OutlineMaterial;
@@ -90,6 +95,15 @@ public class PlayerWeaponController : MonoBehaviour
 
         if (!isFiring && !isSlashing)
             FollowAndTrack();
+
+        if (onCooldown)
+        {
+            float distToPlayer = Vector2.Distance(rb.position, player.position);
+            if (distToPlayer <= coolDownDistance)
+            {
+                onCooldown = false;
+            }
+        }
     }
     #endregion
 
@@ -97,6 +111,9 @@ public class PlayerWeaponController : MonoBehaviour
     private void ReadInput()
     {
         moveInput = moveAction != null ? moveAction.ReadValue<Vector2>() : Vector2.zero;
+
+        if (Mathf.Abs(moveInput.x) >= stickDeadzone)
+            lastMoveX = Mathf.Sign(moveInput.x);
     }
 
     public void OnEquipped() => IsEquipped = true;
@@ -134,18 +151,52 @@ public class PlayerWeaponController : MonoBehaviour
         if (target == null) return;
         if (isFiring || isSlashing) return;
 
-        Vector2 predicted = target.position;
-        Vector2 toTarget = predicted - rb.position;
-        Vector2 desiredVelocity = toTarget * followStrength;
-        velocity = Vector2.Lerp(velocity, desiredVelocity, 1f - Mathf.Exp(-damping * Time.fixedDeltaTime));
-        velocity = Vector2.ClampMagnitude(velocity, maxSpeed);
-        Transform autoTarget = FindNearestTargets().nearestOverall;
+        Vector2 playerPos = target.position;
+        Vector2 currentPos = rb.position;
 
+        // Base direction toward player
+        Vector2 toPlayer = playerPos - currentPos;
+        Vector2 followDir = toPlayer.normalized;
+
+        // Nearest enemy
+        Transform autoTarget = FindNearestTargets().nearestOverall;
         bool stickActive = moveInput.magnitude >= stickDeadzone;
         if (requireStickNeutralToAutoTarget & stickActive) autoTarget = null;
 
-        float targetAngle = angle;
+        Vector2 moveDir = followDir;
 
+        if (autoTarget != null)
+        {
+            Vector2 toEnemy = ((Vector2)autoTarget.position - currentPos).normalized;
+            moveDir = Vector2.Lerp(followDir, toEnemy, aimBias).normalized;
+        }
+
+        // Desired velocity
+        Vector2 desiredVelocity = moveDir * followStrength;
+
+        // Smooth velocity
+        float smoothFactor = 1f - Mathf.Exp(-damping * Time.fixedDeltaTime);
+        velocity = Vector2.Lerp(velocity, desiredVelocity, smoothFactor);
+
+        // Calculate next position
+        Vector2 desiredPos = currentPos + velocity * Time.fixedDeltaTime;
+
+        // --- Soft radius constraint ---
+        Vector2 offsetFromPlayer = desiredPos - playerPos;
+        float offsetMag = offsetFromPlayer.magnitude;
+
+        if (offsetMag > followRadius)
+        {
+            // Reduce the movement so it does not leave the radius
+            // Soft approach: scale down velocity proportionally
+            float scale = followRadius / offsetMag;
+            desiredPos = playerPos + offsetFromPlayer * scale;
+        }
+
+        rb.MovePosition(desiredPos);
+
+        // Rotation (smooth)
+        float targetAngle = angle;
         if (autoTarget != null)
         {
             Vector2 d = ((Vector2)autoTarget.position - (Vector2)transform.position).normalized;
@@ -166,7 +217,7 @@ public class PlayerWeaponController : MonoBehaviour
             bal.targetRotation = angle;
         }
 
-        rb.MovePosition(rb.position + velocity * Time.fixedDeltaTime);
+        UpdateTargetOutline(FindNearestTargets().nearestEnemy);
     }
 
     private void UpdateTargetOutline(Transform nearestEnemy)
@@ -207,14 +258,21 @@ public class PlayerWeaponController : MonoBehaviour
         ).SetEase(Ease.OutQuad).WaitForCompletion();
 
         isFiring = false;
+        onCooldown = true;
     }
 
     public IEnumerator SlashRoutine()
     {
+        onCooldown = true;
         isSlashing = true;
         yield return new WaitForSeconds(slashDuration);
         isSlashing = false;
+        onCooldown = false;
     }
+
+    #endregion
+
+    #region Targeting
 
     private Vector2 GetAttackDirection()
     {
@@ -232,16 +290,14 @@ public class PlayerWeaponController : MonoBehaviour
         }
         else
         {
-            float rad = angle * Mathf.Deg2Rad;
-            dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
-            if (dir == Vector2.zero) dir = Vector2.right;
+            // Stick neutral & no auto-target → use last known movement direction
+            dir = new Vector2(lastMoveX, 0f);
         }
+
 
         return dir;
     }
-    #endregion
 
-    #region Targeting
     private (Transform nearestEnemy, Transform nearestOverall) FindNearestTargets()
     {
         ContactFilter2D filter = new ContactFilter2D();
