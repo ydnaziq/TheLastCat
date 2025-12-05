@@ -1,4 +1,5 @@
 using System.Collections;
+using DG.Tweening;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -6,7 +7,7 @@ using UnityEngine.InputSystem;
 public class PlayerController : MonoBehaviour
 {
     #region Enums
-    private enum PlayerState { Grounded, Jumping, Falling, Dead }
+    public enum PlayerState { Grounded, Idle, Jumping, Falling, Dead }
     #endregion
 
     #region Inspector Settings
@@ -24,15 +25,8 @@ public class PlayerController : MonoBehaviour
     [Tooltip("Maximum number of jumps (1 = single, 2 = double)")] public int maxJumpCount = 2;
 
     [Header("Jump Feel")]
-    public float coyoteTime = 0.12f;
     public float jumpBufferTime = 0.12f;
     public float jumpCooldown = 0.08f;
-
-    [Header("Wave Dash Settings")]
-    public float waveDashHorizontalForce = 16f;
-    public float waveDashVerticalForce = -12f;
-    public float waveDashDuration = 0.18f;
-    public float waveDashInputWindow = 0.22f;
 
     [Header("Dash Settings")]
     public float dashForce = 18f;
@@ -46,7 +40,7 @@ public class PlayerController : MonoBehaviour
 
     [Header("References")]
     [SerializeField] private ParticleSystem trailParticles;
-    public Rigidbody2D headRb; // optional, auto-find if null
+    public Rigidbody2D headRb;
 
     #endregion
 
@@ -64,10 +58,9 @@ public class PlayerController : MonoBehaviour
     private bool jumpRequestedThisFrame;
     private float lastJumpTime = -999f;
 
-    private float coyoteTimer = 0f;
     private float jumpBufferTimer = 0f;
 
-    private PlayerState state = PlayerState.Grounded;
+    public PlayerState state = PlayerState.Grounded;
     private Coroutine rotationCoroutine;
     private bool isDead = false;
 
@@ -77,13 +70,9 @@ public class PlayerController : MonoBehaviour
     private Vector2 dashStartVel;
     private Vector2 dashTargetVel;
 
-    // Wave dash state
-    private bool waveDashQueued = false;
-    private bool isWaveDashing = false;
-    private float waveDashTimer = 0f;
-    private float waveDashTime = 0f;
-    private Vector2 waveDashStartVel;
-    private Vector2 waveDashTargetVel;
+    // Sprite flip tween
+    private bool isFacingRight = true;
+    private Tween flipTween;
 
     #endregion
 
@@ -103,7 +92,8 @@ public class PlayerController : MonoBehaviour
         }
 
         availableJumps = maxJumpCount;
-
+        trailParticles.Stop();
+        isFacingRight = true;
     }
 
     void OnEnable()
@@ -140,7 +130,6 @@ public class PlayerController : MonoBehaviour
         HandleMovementPhysics();
         HandleGravityPhysics();
         HandleDashPhysics();
-        HandleWaveDashPhysics();
 
         if (jumpRequestedThisFrame)
         {
@@ -153,7 +142,6 @@ public class PlayerController : MonoBehaviour
     {
         if (isDead) return;
 
-        // Instant kill
         if (collision.gameObject.layer == LayerMask.NameToLayer("InstantFatal"))
         {
             var bloodPrefab = Resources.Load<GameObject>("Prefabs/Effects/Blood");
@@ -169,7 +157,6 @@ public class PlayerController : MonoBehaviour
             if (Vector2.Angle(contact.normal, Vector2.up) <= maxGroundAngle)
             {
                 availableJumps = maxJumpCount;
-                coyoteTimer = coyoteTime;
                 state = PlayerState.Grounded;
                 break;
             }
@@ -198,62 +185,33 @@ public class PlayerController : MonoBehaviour
 
     private void HandleInput()
     {
-        // Read movement input
         moveInput = moveAction != null ? moveAction.ReadValue<Vector2>() : Vector2.zero;
+        if (moveInput.x != 0f && !isDashing && state != PlayerState.Jumping)
+        {
+            if ((moveInput.x > 0f && !isFacingRight) || (moveInput.x < 0f && isFacingRight))
+            {
+                isFacingRight = moveInput.x > 0f;
+                FlipSprite(isFacingRight);
+            }
+        }
+        else if (Mathf.Abs(moveInput.x) < 0.25f && state == PlayerState.Grounded)
+        {
+            state = PlayerState.Idle;
+        }
 
-        bool jumpPressed = jumpAction != null && jumpAction.triggered;
-        bool dashPressed = dashAction != null && dashAction.triggered;
-        bool holdingDown = moveInput.y < -0.5f;
-
-        // ------------------------------
-        // JUMP BUFFER
-        // ------------------------------
-        if (jumpPressed)
+        if (jumpAction != null && jumpAction.triggered)
             jumpBufferTimer = jumpBufferTime;
 
-        // ------------------------------
-        // DASH INPUT
-        // ------------------------------
+        HandleJumpBuffer();
+
+        bool dashPressed = dashAction != null && dashAction.triggered;
+
         if (dashPressed)
         {
+            controlTrail(true);
+
             float dir = moveInput.x != 0 ? Mathf.Sign(moveInput.x) : 1f;
             StartDash(dir);
-        }
-
-        // ------------------------------
-        // WAVE-DASH QUEUE (jump + holding down)
-        // ------------------------------
-        if (jumpPressed && holdingDown)
-        {
-            waveDashQueued = true;
-
-            var main = trailParticles.main;
-            main.startColor = Color.cyan;
-
-            waveDashTimer = waveDashInputWindow;
-        }
-        else
-        {
-            waveDashTimer -= Time.deltaTime;
-            if (waveDashTimer <= 0f)
-                waveDashQueued = false;
-        }
-
-        // ------------------------------
-        // TIMERS
-        // ------------------------------
-        if (coyoteTimer > 0f) coyoteTimer -= Time.deltaTime;
-        if (jumpBufferTimer > 0f) jumpBufferTimer -= Time.deltaTime;
-
-        // ------------------------------
-        // FINAL JUMP EXECUTION CONDITIONS
-        // ------------------------------
-        if (jumpBufferTimer > 0f &&
-            (coyoteTimer > 0f || availableJumps > 0) &&
-            Time.time - lastJumpTime > jumpCooldown)
-        {
-            jumpRequestedThisFrame = true;
-            jumpBufferTimer = 0f;
         }
     }
 
@@ -296,25 +254,40 @@ public class PlayerController : MonoBehaviour
 
     #region Jumping
 
+    private void HandleJumpBuffer()
+    {
+        // Decrease jump buffer timer
+        if (jumpBufferTimer > 0f)
+            jumpBufferTimer -= Time.deltaTime;
+
+        // Check if a jump is requested and allowed
+        if (jumpBufferTimer > 0f && availableJumps > 0 &&
+            Time.time - lastJumpTime > jumpCooldown)
+        {
+            ExecuteJump();
+            jumpBufferTimer = 0f;
+        }
+    }
+
     private void ExecuteJump()
     {
+        // Respect jump cooldown
         if (Time.time - lastJumpTime < jumpCooldown) return;
 
-        bool allowed = (coyoteTimer > 0f) || (availableJumps > 0);
-        if (!allowed) return;
-
+        // Consume a jump
         lastJumpTime = Time.time;
+        availableJumps = Mathf.Max(0, availableJumps - 1);
 
-        if (state != PlayerState.Grounded) availableJumps = Mathf.Max(0, availableJumps - 1);
-        else availableJumps = Mathf.Max(0, availableJumps - 1);
-
+        // Reset vertical velocity before jump
         Vector2 v = rb.linearVelocity;
         v.y = 0f;
         rb.linearVelocity = v;
 
+        // Apply jump force
         rb.AddForce(Vector2.up * jumpForce, ForceMode2D.Impulse);
         state = PlayerState.Jumping;
 
+        // Trigger double jump rotation if this is the last jump
         if (availableJumps == 0 && balance != null)
         {
             if (rotationCoroutine != null) StopCoroutine(rotationCoroutine);
@@ -349,20 +322,18 @@ public class PlayerController : MonoBehaviour
         balance.smoothSpeed = prevSmooth;
         balance.targetRotation = 0f;
     }
-
     #endregion
 
     #region Dash & Wave Dash
 
     private void StartDash(float direction)
     {
-        var trailParticlesMain = trailParticles.main;
-        trailParticlesMain.startColor = Color.cyan;
         dashStartVel = rb.linearVelocity;
         dashTargetVel = new Vector2(direction * dashForce, 0f);
         dashTime = 0f;
         isDashing = true;
-        rb.gravityScale = 0f;
+
+        rb.gravityScale = -0.5f;
         IgnoreDashCollisions();
         state = PlayerState.Falling;
     }
@@ -370,7 +341,6 @@ public class PlayerController : MonoBehaviour
     private void HandleDashPhysics()
     {
         if (!isDashing) return;
-        var trailParticlesMain = trailParticles.main;
         dashTime += Time.fixedDeltaTime;
         float t = dashTime / dashDuration;
         rb.linearVelocity = Vector2.Lerp(dashStartVel, dashTargetVel, t);
@@ -381,49 +351,10 @@ public class PlayerController : MonoBehaviour
         }
         if (t >= 1f)
         {
-            trailParticlesMain.startColor = Color.white;
+            controlTrail(false);
             isDashing = false;
             rb.gravityScale = 1f;
             RestoreDashCollisions();
-        }
-    }
-
-    private void HandleWaveDashPhysics()
-    {
-        if (isWaveDashing)
-        {
-            var trailParticlesMain = trailParticles.main;
-            waveDashTime += Time.fixedDeltaTime;
-            float t = waveDashTime / waveDashDuration;
-            rb.linearVelocity = Vector2.Lerp(waveDashStartVel, waveDashTargetVel, t);
-
-            if (t >= 1f)
-            {
-                trailParticlesMain.startColor = Color.white;
-                isWaveDashing = false;
-                rb.gravityScale = 1f;
-            }
-            return;
-        }
-
-        bool recentlyJumped = (Time.time - lastJumpTime) <= waveDashInputWindow;
-
-        if (waveDashQueued && recentlyJumped)
-        {
-            waveDashQueued = false;
-            float dir = moveInput.x != 0 ? Mathf.Sign(moveInput.x) : 1f;
-
-            waveDashStartVel = rb.linearVelocity;
-            waveDashTargetVel = new Vector2(dir * waveDashHorizontalForce, waveDashVerticalForce);
-            waveDashTime = 0f;
-
-            isWaveDashing = true;
-            rb.gravityScale = downwardGravity * 1.5f;
-
-            if (availableJumps > 0)
-                availableJumps--;
-
-            state = PlayerState.Falling;
         }
     }
 
@@ -477,15 +408,29 @@ public class PlayerController : MonoBehaviour
         if (grounded)
         {
             availableJumps = maxJumpCount;
-            coyoteTimer = coyoteTime;
             if (state == PlayerState.Falling || state == PlayerState.Jumping)
                 state = PlayerState.Grounded;
         }
         else if (state == PlayerState.Grounded)
         {
-            coyoteTimer = coyoteTime;
             state = PlayerState.Falling;
         }
+    }
+
+    #endregion
+
+    #region Methods
+    private void controlTrail(bool state)
+    {
+        if (state)
+            trailParticles.Play();
+        else
+            trailParticles.Stop();
+    }
+
+    public void FlipSprite(bool faceRight)
+    {
+        // place holder
     }
 
     #endregion

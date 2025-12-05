@@ -95,6 +95,10 @@ public class PlayerWeaponsManager : MonoBehaviour
     {
         if (equippedSpears.Count == 0) return;
         if (globalSlashOnCooldown) return;
+        if (currentSpearIndex >= equippedSpears.Count)
+        {
+            currentSpearIndex = 0;
+        }
         var spear = equippedSpears[currentSpearIndex];
         if (spear.onCooldown) return;
         StartCoroutine(spear.ProjectileRoutine());
