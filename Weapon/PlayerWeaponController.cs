@@ -11,7 +11,6 @@ public class PlayerWeaponController : MonoBehaviour
 
     #region General Settings
     [Header("General Settings")]
-
     Collider2D col;
     public bool IsEquipped;
     private Transform player;
@@ -38,10 +37,19 @@ public class PlayerWeaponController : MonoBehaviour
 
     [Header("Orbit Settings")]
     [SerializeField] private float orbitDistance = 1.5f;   // distance from player
-    [SerializeField] private float orbitSpeed = 90f;       // degrees per second
     [SerializeField] private float orbitTime = 1.4f;       // for DOTween ease
     private float orbitAngle = 0f;
     private Tween orbitTween;
+
+    [SerializeField]
+    AnimationCurve elasticTrimmedCurve =
+    new AnimationCurve(
+        new Keyframe(0f, 0.5f),       // starts mid-speed (no slow buildup)
+        new Keyframe(0.15f, 1.2f),    // elastic overshoot
+        new Keyframe(0.35f, 0.8f),    // bounce back
+        new Keyframe(0.6f, 1.05f),    // minor bounce
+        new Keyframe(1f, 0.5f));      // ends mid-speed (no slow tail)
+
 
     private Rigidbody2D rb;
     private Balance bal;
@@ -57,7 +65,7 @@ public class PlayerWeaponController : MonoBehaviour
     private float angle;
     private bool isFiring = false;
     public bool onCooldown = false;
-    private float coolDownDistance = 2f;
+    public float coolDownDistance = 4f;
 
     private Transform mostRecentTarget;
     private Material OutlineMaterial;
@@ -138,7 +146,11 @@ public class PlayerWeaponController : MonoBehaviour
             if (cinemachineCollisionImpulseSource != null) cinemachineCollisionImpulseSource.enabled = true;
             gameObject.layer = LayerMask.NameToLayer("PlayerWeapon");
             int playerLayer = LayerMask.NameToLayer("Player");
-            col.excludeLayers = playerLayer >= 0 ? 1 << playerLayer : 0;
+            int defaultLayer = LayerMask.NameToLayer("Default");
+
+            col.excludeLayers =
+                (playerLayer >= 0 ? 1 << playerLayer : 0) |
+                (defaultLayer >= 0 ? 1 << defaultLayer : 0);
         }
         else
         {
@@ -157,8 +169,9 @@ public class PlayerWeaponController : MonoBehaviour
     {
         if (isFiring)
             currentState = WeaponState.Attacking;
-        else if (playerController.state == PlayerController.PlayerState.Idle && FindNearestTargets().nearestEnemy == null)
+        else if (FindNearestTargets().nearestEnemy == null && !isFiring)
         {
+            orbitAngle = Random.Range(0f, 360f);
             currentState = WeaponState.Orbit;
         }
         else
@@ -170,17 +183,13 @@ public class PlayerWeaponController : MonoBehaviour
         switch (currentState)
         {
             case WeaponState.Following:
-                col.enabled = false;
                 StopOrbitAnimation();
                 FollowLogic();
                 break;
             case WeaponState.Orbit:
-                col.enabled = false;
                 StartOrbitAnimation();
-                OrbitLogic();
                 break;
             case WeaponState.Attacking:
-                col.enabled = true;
                 StopOrbitAnimation();
                 break;
             case WeaponState.Idle:
@@ -344,40 +353,37 @@ public class PlayerWeaponController : MonoBehaviour
     #endregion
 
     #region Orbit Animation
-
-    private void OrbitLogic()
-    {
-        if (target == null) return;
-
-        // Advance angle by orbitSpeed
-        orbitAngle += orbitSpeed * Time.fixedDeltaTime;
-        orbitAngle %= 360f; // keep angle in 0-360
-
-        // Compute orbit position using cosine/sine
-        Vector2 orbitOffset = new Vector2(Mathf.Cos(orbitAngle * Mathf.Deg2Rad),
-                                          Mathf.Sin(orbitAngle * Mathf.Deg2Rad)) * orbitDistance;
-
-        rb.MovePosition((Vector2)target.position + orbitOffset);
-
-        // Keep rotation smooth
-        if (bal != null)
-        {
-            bal.smoothSpeed = 100f;
-            bal.targetRotation = angle;
-        }
-    }
-
     private void StartOrbitAnimation()
     {
         if (orbitTween != null && orbitTween.IsActive()) return;
 
-        // Randomize starting angle for variation between knives
-        orbitAngle = Random.Range(0f, 360f);
+        orbitTween = DOTween.To(
+                () => orbitAngle,
+                x => orbitAngle = x,
+                orbitAngle + 360f,
+                orbitTime
+            )
+            .SetEase(elasticTrimmedCurve)          // ★ trimmed elastic
+            .SetLoops(-1, LoopType.Incremental)    // infinite, no stalls
+            .OnUpdate(UpdateOrbitPosition);
+    }
 
-        // Use DOTween for subtle easing if desired
-        orbitTween = DOTween.To(() => orbitAngle, x => orbitAngle = x, 360f + orbitAngle, orbitTime)
-                            .SetEase(Ease.OutElastic)
-                            .SetLoops(-1, LoopType.Incremental);
+    private void UpdateOrbitPosition()
+    {
+        if (target == null) return;
+
+        Vector2 offset = new Vector2(
+            Mathf.Cos(orbitAngle * Mathf.Deg2Rad),
+            Mathf.Sin(orbitAngle * Mathf.Deg2Rad)
+        ) * orbitDistance;
+
+        rb.MovePosition((Vector2)target.position + offset);
+
+        if (bal != null)
+        {
+            bal.smoothSpeed = 100f;
+            bal.targetRotation = orbitAngle;
+        }
     }
 
     private void StopOrbitAnimation()

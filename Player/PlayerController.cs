@@ -7,7 +7,7 @@ using UnityEngine.InputSystem;
 public class PlayerController : MonoBehaviour
 {
     #region Enums
-    public enum PlayerState { Grounded, Idle, Jumping, Falling, Dead }
+    public enum PlayerState { Grounded, Idle, Jumping, Falling, Dashing, Dead }
     #endregion
 
     #region Inspector Settings
@@ -72,7 +72,6 @@ public class PlayerController : MonoBehaviour
 
     // Sprite flip tween
     private bool isFacingRight = true;
-    private Tween flipTween;
 
     #endregion
 
@@ -125,8 +124,6 @@ public class PlayerController : MonoBehaviour
     {
         if (isDead) return;
 
-        UpdateGroundedState();
-
         HandleMovementPhysics();
         HandleGravityPhysics();
         HandleDashPhysics();
@@ -166,7 +163,7 @@ public class PlayerController : MonoBehaviour
     void OnCollisionExit2D(Collision2D collision)
     {
         if (isDead) return;
-        if (rb.linearVelocity.y < 0f) state = PlayerState.Falling;
+        if (rb.linearVelocity.y < 1f) state = PlayerState.Falling;
     }
 
     void OnDrawGizmosSelected()
@@ -193,10 +190,6 @@ public class PlayerController : MonoBehaviour
                 isFacingRight = moveInput.x > 0f;
                 FlipSprite(isFacingRight);
             }
-        }
-        else if (Mathf.Abs(moveInput.x) < 0.25f && state == PlayerState.Grounded)
-        {
-            state = PlayerState.Idle;
         }
 
         if (jumpAction != null && jumpAction.triggered)
@@ -335,7 +328,7 @@ public class PlayerController : MonoBehaviour
 
         rb.gravityScale = -0.5f;
         IgnoreDashCollisions();
-        state = PlayerState.Falling;
+        state = PlayerState.Dashing;
     }
 
     private void HandleDashPhysics()
@@ -380,41 +373,6 @@ public class PlayerController : MonoBehaviour
 
         foreach (int layer in new int[] { LayerMask.NameToLayer("Fatal"), LayerMask.NameToLayer("Enemy") })
             Physics2D.IgnoreLayerCollision(gameObject.layer, layer, false);
-    }
-
-    #endregion
-
-    #region Ground Detection
-
-    private void UpdateGroundedState()
-    {
-        bool grounded = false;
-        Vector2 checkCenter = (Vector2)transform.position + groundCheckOffset;
-        Collider2D[] hits = Physics2D.OverlapCircleAll(checkCenter, groundCheckRadius, groundLayers);
-
-        foreach (var c in hits)
-        {
-            RaycastHit2D hit = Physics2D.Raycast((Vector2)transform.position + Vector2.up * 0.1f,
-                (c.transform.position - transform.position).normalized, 1f, groundLayers);
-
-            if ((hit.collider != null && Vector2.Angle(hit.normal, Vector2.up) <= maxGroundAngle) ||
-                c.bounds.center.y <= transform.position.y)
-            {
-                grounded = true;
-                break;
-            }
-        }
-
-        if (grounded)
-        {
-            availableJumps = maxJumpCount;
-            if (state == PlayerState.Falling || state == PlayerState.Jumping)
-                state = PlayerState.Grounded;
-        }
-        else if (state == PlayerState.Grounded)
-        {
-            state = PlayerState.Falling;
-        }
     }
 
     #endregion
