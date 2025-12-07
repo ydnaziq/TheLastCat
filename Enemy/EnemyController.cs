@@ -286,7 +286,6 @@ public class EnemyController : MonoBehaviour
         if (collision.gameObject.layer == LayerMask.NameToLayer("PlayerWeapon") && state != State.Dead)
         {
             Instantiate(Resources.Load<GameObject>("Prefabs/Effects/Blood"), transform.position, Quaternion.identity);
-            GetComponent<SpriteFlash>().Flash(0.25f);
             GetComponent<ApplyKnockback>().Knockback(collision.transform);
 
             gameObject.tag = "Untagged";

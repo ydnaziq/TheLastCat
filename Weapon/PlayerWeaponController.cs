@@ -7,55 +7,83 @@ using Unity.Cinemachine;
 [RequireComponent(typeof(Rigidbody2D), typeof(Balance), typeof(Collider2D))]
 public class PlayerWeaponController : MonoBehaviour
 {
+    public enum WeaponState { Idle, Orbit, Following, Attacking }
+
+    #region General Settings
     [Header("General Settings")]
+    Collider2D col;
     public bool IsEquipped;
     private Transform player;
     private Transform target;
     public float followStrength = 8f;
     public float damping = 5f;
     public float maxSpeed = 12f;
-    public float lookaheadInertia = 0.2f;
+    private float lastMoveX = 1f;
 
     [Header("Projectile Settings")]
     public float projectileForce = 10f;
     public float projectileDuration = 0.2f;
-
-    [Header("Melee Settings")]
-    public float slashDuration = 0.1f;
 
     [Header("Animation / Transform Settings")]
     [HideInInspector] public Vector3 originalScale;
     [HideInInspector] public Quaternion originalRotation;
 
     [Header("Aim / Input Settings")]
+    [SerializeField] private float followRadius = 2f;
+    [SerializeField] private float aimBias = 0.25f;
     [Range(0f, 0.5f)] public float stickDeadzone = 0.18f;
     public bool requireStickNeutralToAutoTarget = true;
     public float angleLerpSpeed = 12f;
 
+    [Header("Orbit Settings")]
+    [SerializeField] private float orbitDistance = 1.5f;   // distance from player
+    [SerializeField] private float orbitTime = 1.4f;       // for DOTween ease
+    private float orbitAngle = 0f;
+    private Tween orbitTween;
+
+    [SerializeField]
+    AnimationCurve elasticTrimmedCurve =
+    new AnimationCurve(
+        new Keyframe(0f, 0.5f),       // starts mid-speed (no slow buildup)
+        new Keyframe(0.15f, 1.2f),    // elastic overshoot
+        new Keyframe(0.35f, 0.8f),    // bounce back
+        new Keyframe(0.6f, 1.05f),    // minor bounce
+        new Keyframe(1f, 0.5f));      // ends mid-speed (no slow tail)
+
+
     private Rigidbody2D rb;
     private Balance bal;
     private InputAction moveAction;
+    private CinemachineCollisionImpulseSource cinemachineCollisionImpulseSource;
+    private PlayerWeaponsManager playerWeaponsManager;
+    private PlayerController playerController;
+    #endregion
+
+    #region Runtime Variables
     private Vector2 moveInput;
     private Vector2 velocity;
     private float angle;
     private bool isFiring = false;
-    private bool isSlashing = false;
+    public bool onCooldown = false;
+    public float coolDownDistance = 4f;
 
     private Transform mostRecentTarget;
     private Material OutlineMaterial;
     private Material DefaultMaterial;
 
-    private static readonly Collider2D[] hits = new Collider2D[100];
     private LayerMask enemyLayerMask;
     private LayerMask fatalLayerMask;
-    private CinemachineCollisionImpulseSource cinemachineCollisionImpulseSource;
-    private PlayerWeaponsManager playerWeaponsManager;
+    private static readonly Collider2D[] hits = new Collider2D[100];
+
+    public WeaponState currentState = WeaponState.Idle;
+    #endregion
 
     #region Unity Callbacks
-    void Start()
+    private void Start()
     {
         rb = GetComponent<Rigidbody2D>();
         bal = GetComponent<Balance>();
+        col = GetComponent<Collider2D>();
         player = GameObject.FindGameObjectWithTag("Player")?.transform;
 
         moveAction = InputSystem.actions.FindAction("Move");
@@ -76,20 +104,24 @@ public class PlayerWeaponController : MonoBehaviour
         originalRotation = transform.localRotation;
 
         playerWeaponsManager = player.GetComponent<PlayerWeaponsManager>();
+        playerController = player.GetComponent<PlayerController>();
     }
 
-    void Update()
+    private void Update()
     {
         ReadInput();
         UpdateLayerAndTarget();
+        UpdateState();
     }
 
-    void FixedUpdate()
+    private void FixedUpdate()
     {
         if (!IsEquipped) return;
 
-        if (!isFiring && !isSlashing)
-            FollowAndTrack();
+        HandleStateLogic();
+
+        if (onCooldown && Vector2.Distance(rb.position, player.position) <= coolDownDistance)
+            onCooldown = false;
     }
     #endregion
 
@@ -97,6 +129,9 @@ public class PlayerWeaponController : MonoBehaviour
     private void ReadInput()
     {
         moveInput = moveAction != null ? moveAction.ReadValue<Vector2>() : Vector2.zero;
+
+        if (Mathf.Abs(moveInput.x) >= stickDeadzone)
+            lastMoveX = Mathf.Sign(moveInput.x);
     }
 
     public void OnEquipped() => IsEquipped = true;
@@ -104,21 +139,22 @@ public class PlayerWeaponController : MonoBehaviour
 
     private void UpdateLayerAndTarget()
     {
-        Collider2D col = GetComponent<Collider2D>();
         if (col == null) return;
 
         if (IsEquipped)
         {
             if (cinemachineCollisionImpulseSource != null) cinemachineCollisionImpulseSource.enabled = true;
-
             gameObject.layer = LayerMask.NameToLayer("PlayerWeapon");
             int playerLayer = LayerMask.NameToLayer("Player");
-            col.excludeLayers = playerLayer >= 0 ? 1 << playerLayer : 0;
+            int defaultLayer = LayerMask.NameToLayer("Default");
+
+            col.excludeLayers =
+                (playerLayer >= 0 ? 1 << playerLayer : 0) |
+                (defaultLayer >= 0 ? 1 << defaultLayer : 0);
         }
         else
         {
             if (cinemachineCollisionImpulseSource != null) cinemachineCollisionImpulseSource.enabled = false;
-
             gameObject.layer = LayerMask.NameToLayer("Default");
             int nothingLayer = LayerMask.NameToLayer("Nothing");
             col.excludeLayers = nothingLayer >= 0 ? 1 << nothingLayer : 0;
@@ -128,22 +164,82 @@ public class PlayerWeaponController : MonoBehaviour
     }
     #endregion
 
-    #region Follow & Aim
-    private void FollowAndTrack()
+    #region State Machine
+    private void UpdateState()
+    {
+        if (isFiring)
+            currentState = WeaponState.Attacking;
+        else if (FindNearestTargets().nearestEnemy == null && !isFiring)
+        {
+            orbitAngle = Random.Range(0f, 360f);
+            currentState = WeaponState.Orbit;
+        }
+        else
+            currentState = WeaponState.Following;
+    }
+
+    private void HandleStateLogic()
+    {
+        switch (currentState)
+        {
+            case WeaponState.Following:
+                StopOrbitAnimation();
+                FollowLogic();
+                break;
+            case WeaponState.Orbit:
+                StartOrbitAnimation();
+                break;
+            case WeaponState.Attacking:
+                StopOrbitAnimation();
+                break;
+            case WeaponState.Idle:
+            default:
+                StopOrbitAnimation();
+                break;
+        }
+    }
+    #endregion
+
+    #region Movement Logic
+    private void FollowLogic()
     {
         if (target == null) return;
-        if (isFiring || isSlashing) return;
 
-        Vector2 predicted = target.position;
-        Vector2 toTarget = predicted - rb.position;
-        Vector2 desiredVelocity = toTarget * followStrength;
-        velocity = Vector2.Lerp(velocity, desiredVelocity, 1f - Mathf.Exp(-damping * Time.fixedDeltaTime));
-        velocity = Vector2.ClampMagnitude(velocity, maxSpeed);
+        Vector2 currentPos = rb.position;
+        Vector2 playerPos = target.position;
+
+        Vector2 followDir = (playerPos - currentPos).normalized;
+
         Transform autoTarget = FindNearestTargets().nearestOverall;
-
         bool stickActive = moveInput.magnitude >= stickDeadzone;
         if (requireStickNeutralToAutoTarget & stickActive) autoTarget = null;
 
+        Vector2 moveDir = followDir;
+
+        if (autoTarget != null)
+        {
+            Vector2 toEnemy = ((Vector2)autoTarget.position - currentPos).normalized;
+            moveDir = Vector2.Lerp(followDir, toEnemy, aimBias).normalized;
+        }
+
+        Vector2 desiredVelocity = moveDir * followStrength;
+        float smoothFactor = 1f - Mathf.Exp(-damping * Time.fixedDeltaTime);
+        velocity = Vector2.Lerp(velocity, desiredVelocity, smoothFactor);
+
+        Vector2 desiredPos = currentPos + velocity * Time.fixedDeltaTime;
+
+        Vector2 offset = desiredPos - playerPos;
+        if (offset.magnitude > followRadius)
+            desiredPos = playerPos + offset.normalized * followRadius;
+
+        rb.MovePosition(desiredPos);
+
+        UpdateRotation(autoTarget, stickActive);
+        UpdateTargetOutline(FindNearestTargets().nearestEnemy);
+    }
+
+    private void UpdateRotation(Transform autoTarget, bool stickActive)
+    {
         float targetAngle = angle;
 
         if (autoTarget != null)
@@ -165,10 +261,10 @@ public class PlayerWeaponController : MonoBehaviour
             bal.smoothSpeed = 10000f;
             bal.targetRotation = angle;
         }
-
-        rb.MovePosition(rb.position + velocity * Time.fixedDeltaTime);
     }
+    #endregion
 
+    #region Targeting
     private void UpdateTargetOutline(Transform nearestEnemy)
     {
         if (nearestEnemy != mostRecentTarget)
@@ -176,79 +272,28 @@ public class PlayerWeaponController : MonoBehaviour
             if (mostRecentTarget != null)
             {
                 var srOld = mostRecentTarget.GetComponent<SpriteRenderer>();
-                if (srOld != null && DefaultMaterial != null) srOld.material = DefaultMaterial;
+                if (srOld != null && DefaultMaterial != null)
+                    srOld.material = DefaultMaterial;
             }
 
             if (nearestEnemy != null)
             {
                 var srNew = nearestEnemy.GetComponent<SpriteRenderer>();
-                if (srNew != null && OutlineMaterial != null) srNew.material = OutlineMaterial;
+                if (srNew != null && OutlineMaterial != null)
+                    srNew.material = OutlineMaterial;
             }
 
             mostRecentTarget = nearestEnemy;
         }
     }
-    #endregion
 
-    #region Attack Routines
-    public IEnumerator ProjectileRoutine()
-    {
-        isFiring = true;
-
-        Vector2 dir = GetAttackDirection();
-        bal.targetRotation = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
-        Vector2 stabTarget = (Vector2)player.position + dir * projectileForce;
-
-        yield return DOTween.To(
-            () => rb.position,
-            p => rb.MovePosition(p),
-            stabTarget,
-            projectileDuration
-        ).SetEase(Ease.OutQuad).WaitForCompletion();
-
-        isFiring = false;
-    }
-
-    public IEnumerator SlashRoutine()
-    {
-        isSlashing = true;
-        yield return new WaitForSeconds(slashDuration);
-        isSlashing = false;
-    }
-
-    private Vector2 GetAttackDirection()
-    {
-
-        Transform nearest = FindNearestTargets().nearestEnemy;
-        Vector2 dir = Vector2.zero;
-
-        if (nearest != null)
-        {
-            dir = (nearest.position - player.position).normalized;
-        }
-        else if (moveInput.magnitude >= stickDeadzone)
-        {
-            dir = moveInput.normalized;
-        }
-        else
-        {
-            float rad = angle * Mathf.Deg2Rad;
-            dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
-            if (dir == Vector2.zero) dir = Vector2.right;
-        }
-
-        return dir;
-    }
-    #endregion
-
-    #region Targeting
     private (Transform nearestEnemy, Transform nearestOverall) FindNearestTargets()
     {
         ContactFilter2D filter = new ContactFilter2D();
         filter.useTriggers = true;
         filter.SetLayerMask(enemyLayerMask | fatalLayerMask);
 
-        int count = Physics2D.OverlapCircle(transform.position, 40f, filter, hits);
+        int count = Physics2D.OverlapCircle(transform.position, 15f, filter, hits);
 
         Transform nearestEnemy = null;
         Transform nearestOverall = null;
@@ -277,5 +322,75 @@ public class PlayerWeaponController : MonoBehaviour
 
         return (nearestEnemy, nearestOverall);
     }
+
+    private Vector2 GetAttackDirection()
+    {
+        Transform nearest = FindNearestTargets().nearestEnemy;
+        if (nearest != null)
+            return (nearest.position - player.position).normalized;
+        if (moveInput.magnitude >= stickDeadzone)
+            return moveInput.normalized;
+        return new Vector2(lastMoveX, 0f);
+    }
+    #endregion
+
+    #region Attack Routines
+    public IEnumerator ProjectileRoutine()
+    {
+        isFiring = true;
+
+        Vector2 dir = GetAttackDirection();
+        bal.targetRotation = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
+        Vector2 stabTarget = (Vector2)player.position + dir * projectileForce;
+
+        yield return DOTween.To(() => rb.position, p => rb.MovePosition(p), stabTarget, projectileDuration)
+                        .SetEase(Ease.OutQuad)
+                        .WaitForCompletion();
+
+        isFiring = false;
+        onCooldown = true;
+    }
+    #endregion
+
+    #region Orbit Animation
+    private void StartOrbitAnimation()
+    {
+        if (orbitTween != null && orbitTween.IsActive()) return;
+
+        orbitTween = DOTween.To(
+                () => orbitAngle,
+                x => orbitAngle = x,
+                orbitAngle + 360f,
+                orbitTime
+            )
+            .SetEase(elasticTrimmedCurve)          // ★ trimmed elastic
+            .SetLoops(-1, LoopType.Incremental)    // infinite, no stalls
+            .OnUpdate(UpdateOrbitPosition);
+    }
+
+    private void UpdateOrbitPosition()
+    {
+        if (target == null) return;
+
+        Vector2 offset = new Vector2(
+            Mathf.Cos(orbitAngle * Mathf.Deg2Rad),
+            Mathf.Sin(orbitAngle * Mathf.Deg2Rad)
+        ) * orbitDistance;
+
+        rb.MovePosition((Vector2)target.position + offset);
+
+        if (bal != null)
+        {
+            bal.smoothSpeed = 100f;
+            bal.targetRotation = orbitAngle;
+        }
+    }
+
+    private void StopOrbitAnimation()
+    {
+        orbitTween?.Kill();
+        orbitTween = null;
+    }
+
     #endregion
 }
